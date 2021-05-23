@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,6 +30,8 @@ import java.nio.*;
 import java.nio.channels.*;
 import java.nio.channels.spi.*;
 import java.util.Objects;
+import java.util.function.BiFunction;
+import java.util.function.ToLongBiFunction;
 
 /**
  * This class is defined here rather than in java.nio.channels.Channels
@@ -142,4 +144,48 @@ public class ChannelInputStream
         ch.close();
     }
 
+    @Override
+    public long transferTo(OutputStream out) throws IOException {
+        Objects.requireNonNull(out, "out");
+
+        if (out instanceof ChannelOutputStream cos && ch instanceof FileChannel fc) {
+            return transferInBlockingMode(fc, cos.channel());
+        }
+
+        return super.transferTo(out);
+    }
+
+    private static long transferInBlockingMode(FileChannel fc, WritableByteChannel wbc) throws IOException {
+        return supplyUsingBlockingChannel(fc, () -> supplyUsingBlockingChannel(wbc, () -> transfer(fc, wbc)));
+    }
+
+    @FunctionalInterface
+    private static interface ThrowingLongSupplier<E extends Exception> {
+        long supply() throws E;
+    }
+
+    private static long supplyUsingBlockingChannel(Channel c, ThrowingLongSupplier<IOException> tls)
+            throws IOException {
+        if (c instanceof SelectableChannel sc)
+            synchronized (sc.blockingLock()) {
+                if (!sc.isBlocking())
+                    throw new IllegalBlockingModeException();
+                return tls.supply();
+            }
+        else
+            return tls.supply();
+    }
+
+    private static long transfer(FileChannel src, WritableByteChannel dst) throws IOException {
+        long bytesWritten = 0L;
+        long srcPos = src.position();
+        try {
+            while (srcPos + bytesWritten < src.size()) {
+                bytesWritten += src.transferTo(srcPos + bytesWritten, Long.MAX_VALUE, dst);
+            }
+            return bytesWritten;
+        } finally {
+            src.position(srcPos + bytesWritten);
+        }
+    }
 }
